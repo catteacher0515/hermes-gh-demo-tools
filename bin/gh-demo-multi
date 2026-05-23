@@ -1,6 +1,8 @@
 #!/bin/zsh
 set -euo pipefail
 
+script_dir="$(cd "$(dirname "$0")" && pwd)"
+
 dry_run="false"
 
 usage() {
@@ -80,7 +82,7 @@ fi
 
 for url in "${repo_urls[@]}"; do
   echo "Processing: $url"
-  if output="$(./bin/gh-demo-x "$url" 2>&1)"; then
+  if output="$("$script_dir/gh-demo-x" "$url" 2>&1)"; then
     saved_path="$(printf '%s\n' "$output" | sed -n 's/^Saved: //p' | tail -n 1)"
     done_count=$((done_count + 1))
     {

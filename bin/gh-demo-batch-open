@@ -1,12 +1,14 @@
 #!/bin/zsh
 set -euo pipefail
 
+script_dir="$(cd "$(dirname "$0")" && pwd)"
+
 if [[ $# -lt 1 ]]; then
   echo "Usage: gh-demo-batch-open <txt-file>" >&2
   exit 1
 fi
 
-output="$(gh-demo-batch "$@")"
+output="$("$script_dir/gh-demo-batch" "$@")"
 printf '%s\n' "$output"
 
 summary_path="$(printf '%s\n' "$output" | sed -n 's/^Saved summary: //p' | tail -n 1)"
