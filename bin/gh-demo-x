@@ -74,6 +74,11 @@ repo_api="https://api.github.com/repos/${owner}/${repo}"
 repo_json="${tmp_dir}/repo.json"
 clone_dir="${tmp_dir}/repo"
 facts_file="${tmp_dir}/facts.txt"
+readme_api_json="${tmp_dir}/readme.json"
+contents_api_json="${tmp_dir}/contents.json"
+readme_api_err="${tmp_dir}/readme_api.err"
+contents_api_err="${tmp_dir}/contents_api.err"
+raw_readme_file="${tmp_dir}/README.raw"
 
 metadata_ok="false"
 clone_ok="false"
@@ -82,6 +87,14 @@ readme_path=""
 readme_excerpt=""
 default_branch=""
 head_commit=""
+contents_ok="false"
+readme_ok="false"
+top_level_fallback=""
+manifests_fallback=""
+demo_hints_fallback=""
+clone_source="none"
+api_fallback_status="not_attempted"
+api_fallback_error=""
 
 if curl -fsSL -H "Accept: application/vnd.github+json" "$repo_api" -o "$repo_json" 2>/dev/null; then
   metadata_ok="true"
@@ -95,6 +108,7 @@ fi
 
 if git clone --depth 1 --single-branch "https://github.com/${owner}/${repo}.git" "$clone_dir" >/dev/null 2>"${tmp_dir}/clone.err"; then
   clone_ok="true"
+  clone_source="clone"
 else
   clone_error="$(sed -n '1,20p' "${tmp_dir}/clone.err" | tr '\n' ' ' | sed 's/[[:space:]]\{1,\}/ /g')"
 fi
@@ -148,10 +162,204 @@ PY
   fi
 fi
 
-python3 - "$repo_json" "$metadata_ok" "$clone_dir" "$clone_ok" "$default_branch" "$head_commit" "$clone_error" > "$facts_file" <<'PY'
+if [[ "$clone_ok" != "true" ]]; then
+  api_fallback_status="attempted"
+
+  for candidate in README.md README.mdx README.rst README.txt readme.md readme.mdx readme.rst readme.txt; do
+    raw_url="https://raw.githubusercontent.com/${owner}/${repo}/${default_branch:-main}/${candidate}"
+    if curl -fsSL "$raw_url" -o "$raw_readme_file" 2>/dev/null; then
+      readme_ok="true"
+      if [[ "$clone_source" == "none" ]]; then
+        clone_source="raw_readme_fallback"
+      fi
+      break
+    fi
+  done
+
+  if [[ "$readme_ok" == "true" && -f "$raw_readme_file" ]]; then
+    readme_excerpt="$(python3 - "$raw_readme_file" "$default_branch" "$owner" "$repo" <<'PY'
+import re, sys, pathlib
+path = pathlib.Path(sys.argv[1])
+default_branch = sys.argv[2] or "main"
+owner = sys.argv[3]
+repo = sys.argv[4]
+raw_base = f"https://raw.githubusercontent.com/{owner}/{repo}/{default_branch}/"
+try:
+    text = path.read_text(encoding='utf-8', errors='ignore')
+except Exception:
+    text = ''
+
+def rewrite_md_image(match):
+    alt = match.group(1)
+    url = match.group(2).strip()
+    if re.match(r"^[a-z]+://", url):
+        return match.group(0)
+    return f"![{alt}]({raw_base}{url})"
+
+def rewrite_html_image(match):
+    prefix, url, suffix = match.groups()
+    if re.match(r"^[a-z]+://", url):
+        return match.group(0)
+    return f'{prefix}{raw_base}{url}{suffix}'
+
+text = re.sub(r'!\[([^\]]*)\]\(([^)]+)\)', rewrite_md_image, text)
+text = re.sub(r'(<img[^>]*src=["\'])([^"\']+)(["\'][^>]*>)', rewrite_html_image, text, flags=re.IGNORECASE)
+text = re.sub(r'```.*?```', '[code omitted]', text, flags=re.DOTALL)
+lines = [line.rstrip() for line in text.splitlines()]
+filtered = []
+for line in lines:
+    stripped = line.strip()
+    if stripped.startswith('![') or stripped.startswith('<img'):
+        continue
+    if 'raw.githubusercontent.com' in stripped:
+        continue
+    filtered.append(line)
+snippet = "\n".join(filtered[:90]).strip()
+print(snippet[:6000])
+PY
+)"
+  fi
+
+  if [[ "$readme_ok" != "true" ]] && curl -fsSL -H "Accept: application/vnd.github+json" "${repo_api}/readme" -o "$readme_api_json" 2>"$readme_api_err"; then
+    readme_ok="true"
+    clone_source="github_api_fallback"
+  fi
+
+  if curl -fsSL -H "Accept: application/vnd.github+json" "${repo_api}/contents" -o "$contents_api_json" 2>"$contents_api_err"; then
+    contents_ok="true"
+    clone_source="github_api_fallback"
+  fi
+
+  api_fallback_error="$(
+    {
+      sed -n '1,3p' "$readme_api_err" 2>/dev/null || true
+      sed -n '1,3p' "$contents_api_err" 2>/dev/null || true
+    } | tr '\n' ' ' | sed 's/[[:space:]]\{1,\}/ /g; s/^ *//; s/ *$//'
+  )"
+
+  if [[ "$readme_ok" != "true" && "$contents_ok" != "true" ]]; then
+    api_fallback_status="failed"
+  elif [[ "$readme_ok" == "true" || "$contents_ok" == "true" ]]; then
+    api_fallback_status="partial_or_ok"
+  fi
+
+  if [[ "$readme_ok" == "true" && -z "$readme_excerpt" ]]; then
+    readme_excerpt="$(python3 - "$readme_api_json" "$default_branch" "$owner" "$repo" <<'PY'
+import base64, json, pathlib, re, sys
+
+path = pathlib.Path(sys.argv[1])
+default_branch = sys.argv[2] or "main"
+owner = sys.argv[3]
+repo = sys.argv[4]
+raw_base = f"https://raw.githubusercontent.com/{owner}/{repo}/{default_branch}/"
+
+try:
+    data = json.loads(path.read_text())
+except Exception:
+    data = {}
+
+content = data.get("content", "")
+encoding = data.get("encoding", "")
+if encoding == "base64" and content:
+    try:
+        text = base64.b64decode(content).decode("utf-8", errors="ignore")
+    except Exception:
+        text = ""
+else:
+    text = ""
+
+def rewrite_md_image(match):
+    alt = match.group(1)
+    url = match.group(2).strip()
+    if re.match(r"^[a-z]+://", url):
+        return match.group(0)
+    return f"![{alt}]({raw_base}{url})"
+
+def rewrite_html_image(match):
+    prefix, url, suffix = match.groups()
+    if re.match(r"^[a-z]+://", url):
+        return match.group(0)
+    return f'{prefix}{raw_base}{url}{suffix}'
+
+text = re.sub(r'!\[([^\]]*)\]\(([^)]+)\)', rewrite_md_image, text)
+text = re.sub(r'(<img[^>]*src=["\'])([^"\']+)(["\'][^>]*>)', rewrite_html_image, text, flags=re.IGNORECASE)
+text = re.sub(r'```.*?```', '[code omitted]', text, flags=re.DOTALL)
+
+lines = [line.rstrip() for line in text.splitlines()]
+filtered = []
+for line in lines:
+    stripped = line.strip()
+    if stripped.startswith('![') or stripped.startswith('<img'):
+        continue
+    if 'raw.githubusercontent.com' in stripped:
+        continue
+    filtered.append(line)
+
+snippet = "\n".join(filtered[:90]).strip()
+print(snippet[:6000])
+PY
+)"
+  fi
+
+  if [[ "$contents_ok" == "true" ]]; then
+    readarray_output="$(python3 - "$contents_api_json" <<'PY'
 import json, pathlib, sys
 
-repo_json, metadata_ok, clone_dir, clone_ok, default_branch, head_commit, clone_error = sys.argv[1:]
+path = pathlib.Path(sys.argv[1])
+try:
+    data = json.loads(path.read_text())
+except Exception:
+    data = []
+
+items = []
+if isinstance(data, list):
+    for item in data:
+        name = item.get("name", "")
+        kind = item.get("type", "")
+        if not name:
+            continue
+        suffix = "/" if kind == "dir" else ""
+        items.append(name + suffix)
+
+manifests = []
+for name in [
+    "package.json", "pnpm-lock.yaml", "yarn.lock", "bun.lockb",
+    "pyproject.toml", "requirements.txt", "Pipfile", "poetry.lock",
+    "Cargo.toml", "go.mod", "Dockerfile", "docker-compose.yml",
+    "docker-compose.yaml", "Makefile", "README.md"
+]:
+    if name in [item.get("name", "") for item in data if isinstance(item, dict)]:
+        manifests.append(name)
+
+demo_hints = []
+for item in data:
+    if not isinstance(item, dict):
+        continue
+    name = item.get("name", "")
+    kind = item.get("type", "")
+    lower = name.lower()
+    if any(token in lower for token in ["demo", "example", "examples", "playground", "docs", "website", "web", "app"]):
+        demo_hints.append(name + ("/" if kind == "dir" else ""))
+
+print("TOP_LEVEL=" + ", ".join(sorted(items)[:80]))
+print("MANIFESTS=" + ", ".join(manifests))
+print("DEMO_HINTS=" + ", ".join(sorted(set(demo_hints))[:40]))
+PY
+)"
+    top_level_fallback="$(printf '%s\n' "$readarray_output" | sed -n 's/^TOP_LEVEL=//p')"
+    manifests_fallback="$(printf '%s\n' "$readarray_output" | sed -n 's/^MANIFESTS=//p')"
+    demo_hints_fallback="$(printf '%s\n' "$readarray_output" | sed -n 's/^DEMO_HINTS=//p')"
+  else
+    top_level_fallback="(unavailable: clone failed and contents fallback unavailable)"
+    manifests_fallback="(unavailable)"
+    demo_hints_fallback="(unavailable)"
+  fi
+fi
+
+python3 - "$repo_json" "$metadata_ok" "$clone_dir" "$clone_ok" "$default_branch" "$head_commit" "$clone_error" "$clone_source" "$top_level_fallback" "$manifests_fallback" "$demo_hints_fallback" "$api_fallback_status" "$api_fallback_error" > "$facts_file" <<'PY'
+import json, pathlib, sys
+
+repo_json, metadata_ok, clone_dir, clone_ok, default_branch, head_commit, clone_error, clone_source, top_level_fallback, manifests_fallback, demo_hints_fallback, api_fallback_status, api_fallback_error = sys.argv[1:]
 
 meta = {}
 if metadata_ok == "true":
@@ -180,7 +388,10 @@ p("disabled", meta.get("disabled", ""))
 p("created_at", meta.get("created_at", ""))
 p("pushed_at", meta.get("pushed_at", ""))
 p("clone_ok", clone_ok)
+p("clone_source", clone_source)
 p("clone_error", clone_error)
+p("api_fallback_status", api_fallback_status)
+p("api_fallback_error", api_fallback_error)
 
 if clone_ok == "true":
     root = pathlib.Path(clone_dir)
@@ -201,6 +412,10 @@ if clone_ok == "true":
     p("top_level", ", ".join(top_level[:80]))
     p("manifests", ", ".join(manifests))
     p("demo_hints", ", ".join(sorted(set(demo_hints))[:40]))
+else:
+    p("top_level", top_level_fallback)
+    p("manifests", manifests_fallback)
+    p("demo_hints", demo_hints_fallback)
 PY
 
 read -r -d '' prompt <<EOF || true
@@ -208,26 +423,42 @@ read -r -d '' prompt <<EOF || true
 
 请只基于下面这份【已验证事实卡】输出，不允许基于仓库名、组织名、常识去猜。缺失事实就明确说“无法判断”。
 
-用户真正关心的是：
-- 这个仓库值不值得花 30 分钟亲自体验
-- 如果值得，最适合从什么内容角度切入
-- 哪些点必须用户亲自验证，AI 不能替代
-- 为什么它可能不值得写
+用户是一个偏提效的内容创作者，不是硬核技术博主。他的选题优先级如下：
+- 最高优先级：能提高效率，且他自己可能真会用
+- 高优先级：能提高效率，即使他自己不一定长期用，但很多打工人会用
+- 次优先：好玩，但要足够轻、足够容易体验
+- 低优先：硬核技术仓库
 
-请严格按下面结构输出，不要增删大项：
+明确减分项：
+- 需要很强技术背景才能讲清
+- 很难跑起来
+- 很难形成第一手细节
+- 传播面窄，只能写给少数开发者
 
-1. 一句话判断：值得写 / 待定 / 不值得写
-2. 值得写的核心原因
-3. 最适合的内容角度
-4. 用户必须亲自验证的 2-3 个点
-5. 最小体验路径
-6. 写作风险 / 为什么可能不值得写
-7. 最终建议：入池 / 不入池 / 先观察
+额外注意：
+- 工具体验很重要，但工具体验差 != 仓库价值低
+- 有些提示词库 / 方法库 / 原则库，即使不好“上手玩”，仍然可能有高传播价值
+- 只有在天然存在对比对象时，才提“对比评测”
+
+请严格按下面 9 项结构输出，不要增删大项：
+
+1. 选题结论：值得写 / 待定 / 不值得写
+2. 题材类型：提效工具 / 好玩轻工具 / 方法库 / 提示词库 / 框架认知 / 技术项目
+3. 一句话题眼
+4. 对用户的优先级：最高 / 高 / 次 / 低，并说明原因
+5. 工具体验价值：高 / 中 / 低，并说明原因
+6. 传播张力：高 / 中 / 低，并说明原因
+7. 值得提及的设计亮点
+8. 你必须亲自验证的点
+9. 体验投入等级 + 最终动作：低 / 中 / 高 + 入池 / 先观察 / 放弃
 
 硬约束：
 - 如果事实不足，就明确说“事实不足，暂不建议进入体验阶段”
 - 不要把“仓库跑不通”直接等同于“不值得写”；要判断是否仍有内容价值
-- 但如果既不可体验、也缺少可验证信息、也没有适合用户的内容角度，就明确建议不入池
+- 如果工具体验弱，但它是高价值的方法库 / 提示词库 / 原则库，也要明确指出其内容价值
+- 如果存在天然对比对象，可在“你必须亲自验证的点”里指出，但不要强行添加
+- 体验投入等级只要粗分低 / 中 / 高，不要假装精确到分钟
+- 不要复述 README，不要输出硬核技术长分析
 - 不要输出客套话，不要复述任务
 
 【已验证事实卡】
@@ -235,6 +466,56 @@ EOF
 
 facts_content="$(cat "$facts_file")"
 prompt+=$'\n'"$facts_content"
+
+facts_summary="$(python3 - "$facts_file" <<'PY'
+import pathlib, sys
+
+path = pathlib.Path(sys.argv[1])
+data = {}
+for line in path.read_text(encoding='utf-8', errors='ignore').splitlines():
+    if ': ' not in line:
+        continue
+    k, v = line.split(': ', 1)
+    data[k.strip()] = v.strip()
+
+shape = []
+if data.get("language"):
+    shape.append(data["language"])
+if data.get("stars"):
+    shape.append(f"{data['stars']} stars")
+if data.get("clone_source"):
+    shape.append(f"事实来源: {data['clone_source']}")
+
+repo_kind = []
+top_level = data.get("top_level", "")
+manifests = data.get("manifests", "")
+demo_hints = data.get("demo_hints", "")
+if "README.md" in manifests and "package.json" not in manifests and "go.mod" not in manifests and "Cargo.toml" not in manifests and "pyproject.toml" not in manifests:
+    repo_kind.append("文档型")
+elif "package.json" in manifests or "go.mod" in manifests or "Cargo.toml" in manifests or "pyproject.toml" in manifests:
+    repo_kind.append("代码型")
+if demo_hints and demo_hints != "(unavailable)":
+    repo_kind.append("含 demo/docs 线索")
+if top_level and top_level != "(unavailable: clone failed and contents fallback unavailable)":
+    repo_kind.append("目录已验证")
+
+lines = []
+if data.get("description"):
+    lines.append(f"- 简述: {data['description']}")
+if shape:
+    lines.append(f"- 基本面: {' | '.join(shape)}")
+if repo_kind:
+    lines.append(f"- 仓库形态: {' / '.join(repo_kind)}")
+if data.get("clone_ok") == "false":
+    lines.append("- 运行态: clone 失败，但已进入降级抓取路径")
+if data.get("api_fallback_status") not in ("", "not_attempted"):
+    lines.append(f"- Fallback: {data['api_fallback_status']}")
+if data.get("api_fallback_error"):
+    lines.append(f"- 限制: {data['api_fallback_error'][:120]}")
+
+print("\n".join(lines).strip())
+PY
+)"
 
 if [[ -n "$readme_excerpt" ]]; then
   prompt+=$'\n\n【README 摘要（已截断）】\n'"$readme_excerpt"
@@ -245,6 +526,7 @@ if [[ -n "$extra_note" ]]; then
 fi
 
 hermes_out="${tmp_dir}/hermes.out"
+hermes_clean="${tmp_dir}/hermes.clean"
 hermes_err="${tmp_dir}/hermes.err"
 hermes_ok="false"
 session_line=""
@@ -266,6 +548,155 @@ else
   if [[ -z "$failure_summary" ]]; then
     failure_summary="Hermes 未返回有效判断结果。请检查 provider 配置、额度或账单状态。"
   fi
+
+  failure_summary="$(printf '%s' "$failure_summary" | python3 - <<'PY'
+import re, sys
+text = sys.stdin.read().strip()
+patterns = [
+    r"Error code:\s*\d+[^\n]*",
+    r"Non-retryable client error:[^\n]*",
+    r"Traceback \(most recent call last\):[^\n]*",
+    r"[A-Za-z_]*Error:[^\n]*",
+]
+for pat in patterns:
+    m = re.search(pat, text)
+    if m:
+        print(m.group(0))
+        break
+else:
+    text = re.sub(r"\s+", " ", text).strip()
+    print(text[:240] if text else "")
+PY
+)"
+fi
+
+if [[ "$hermes_ok" == "true" ]]; then
+  python3 - "$hermes_out" "$hermes_clean" <<'PY'
+import pathlib, re, sys
+
+src = pathlib.Path(sys.argv[1])
+dst = pathlib.Path(sys.argv[2])
+text = src.read_text(encoding='utf-8', errors='ignore')
+
+lines = []
+for line in text.splitlines():
+    if re.search(r'clarify timed out.*agent will decide', line, re.IGNORECASE):
+        continue
+    lines.append(line)
+
+cleaned = "\n".join(lines).strip() + "\n"
+dst.write_text(cleaned, encoding='utf-8')
+PY
+fi
+
+formatted_result="${tmp_dir}/hermes.formatted"
+if [[ "$hermes_ok" == "true" ]]; then
+  python3 - "$hermes_clean" "$formatted_result" <<'PY'
+import pathlib, re, sys
+
+src = pathlib.Path(sys.argv[1])
+dst = pathlib.Path(sys.argv[2])
+text = src.read_text(encoding='utf-8', errors='ignore')
+
+text = re.sub(r'^Proceeding with strict analysis.*$', '', text, flags=re.MULTILINE)
+text = re.sub(r'^严格基于.*$', '', text, flags=re.MULTILINE)
+text = re.sub(r'^事实充足.*$', '', text, flags=re.MULTILINE)
+text = re.sub(r'^无法访问 GitHub 页面.*$', '', text, flags=re.MULTILINE)
+
+lines = [line.rstrip() for line in text.splitlines() if line.strip()]
+items = {}
+current = None
+for line in lines:
+    m = re.match(r'^(\d+)\.\s*(.+)$', line)
+    if m:
+        current = int(m.group(1))
+        items[current] = m.group(2).strip()
+    elif current is not None:
+        items[current] += "\n" + line.strip()
+
+def split_title_body(s):
+    if "：" in s:
+        title, body = s.split("：", 1)
+        return title.strip(), body.strip()
+    return s.strip(), ""
+
+out = []
+out.append("## 判断结果")
+out.append("")
+
+labels = {
+    1: "选题结论",
+    2: "题材类型",
+    3: "一句话题眼",
+    4: "对用户的优先级",
+    5: "工具体验价值",
+    6: "传播张力",
+    7: "值得提及的设计亮点",
+    8: "你必须亲自验证的点",
+    9: "体验投入等级 + 最终动作",
+}
+
+for idx in range(1, 10):
+    raw = items.get(idx, "")
+    title, body = split_title_body(raw)
+    header = labels[idx]
+    out.append(f"### {idx}. {header}")
+
+    if idx in (1, 2):
+        out.append(f"**{body or title}**")
+        out.append("")
+        continue
+
+    if idx == 3:
+        out.append(body or title)
+        out.append("")
+        continue
+
+    if idx in (4, 5, 6, 9):
+        lead = body or title
+        lead = re.sub(r'\s*[—-]\s*', '\n\n', lead, count=1)
+        parts = [p.strip() for p in lead.split("\n\n", 1)]
+        out.append(f"**{parts[0]}**")
+        out.append("")
+        if len(parts) > 1 and parts[1]:
+            out.append("原因：")
+            out.append("")
+            sentences = [s.strip() for s in re.split(r'；', parts[1]) if s.strip()]
+            if len(sentences) > 1:
+                for s in sentences:
+                    out.append(f"- {s}")
+            else:
+                out.append(parts[1])
+            out.append("")
+        continue
+
+    if idx == 7:
+        body = body or title
+        body = body.replace("：", "", 1) if body.startswith("：") else body
+        bullets = [s.strip(" 　-") for s in re.split(r'[；\n]+', body) if s.strip(" 　-")]
+        for b in bullets:
+            out.append(f"- {b}")
+        out.append("")
+        continue
+
+    if idx == 8:
+        body = body or title
+        if "——" in body or "—" in body:
+            body = re.sub(r'\s*[—-]\s*', '\n\n', body, count=1)
+        parts = [p.strip() for p in body.split("\n\n", 1)]
+        if parts and parts[0]:
+            out.append(parts[0])
+            out.append("")
+        if len(parts) > 1 and parts[1]:
+            bullets = [s.strip(" 　-") for s in re.split(r'[；\n]+', parts[1]) if s.strip(" 　-")]
+            for b in bullets:
+                out.append(f"- {b}")
+            out.append("")
+        continue
+
+formatted = "\n".join(out).strip() + "\n"
+dst.write_text(formatted, encoding='utf-8')
+PY
 fi
 
 {
@@ -276,15 +707,15 @@ fi
   echo "- Stage: 选题体验前判断"
   echo "- README: ${repo_url}#readme"
   echo
-  echo "## 已验证事实"
+  echo "## 事实摘要"
   echo
-  cat "$facts_file"
-  echo
-  echo "## 判断结果"
+  printf '%s\n' "$facts_summary"
   echo
   if [[ "$hermes_ok" == "true" ]]; then
-    cat "$hermes_out"
+    cat "$formatted_result"
   else
+    echo "## 判断结果"
+    echo
     echo "AI 判断未生成。"
     echo
     echo "- 原因：${failure_summary}"
