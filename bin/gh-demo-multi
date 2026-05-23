@@ -34,9 +34,6 @@ vault_dir="${HOME}/Obsidian"
 out_dir="${vault_dir}/GitHub 仓库闭环"
 mkdir -p "$out_dir"
 
-timestamp="$(date +%Y%m%d-%H%M%S)"
-summary_file="${out_dir}/gh-demo-multi-summary--${timestamp}.md"
-
 typeset -A seen_urls
 repo_urls=()
 
@@ -59,56 +56,23 @@ total="${#repo_urls[@]}"
 done_count=0
 failed_count=0
 
-{
-  echo "# GitHub 仓库批量判断摘要"
-  echo
-  echo "- Generated: $(date '+%Y-%m-%d %H:%M:%S')"
-  echo "- Total: ${total}"
-  echo "- Mode: $( [[ "$dry_run" == "true" ]] && echo "dry-run" || echo "run" )"
-  echo
-  echo "## 仓库列表"
-  echo
-} > "$summary_file"
-
 if [[ "$dry_run" == "true" ]]; then
   for url in "${repo_urls[@]}"; do
-    echo "- ${url}" >> "$summary_file"
     echo "Would process: $url"
   done
-  echo
-  echo "Saved summary: $summary_file"
   exit 0
 fi
 
 for url in "${repo_urls[@]}"; do
-  echo "Processing: $url"
+  echo "==== Processing: $url ===="
   if output="$("$script_dir/gh-demo-x" "$url" 2>&1)"; then
-    saved_path="$(printf '%s\n' "$output" | sed -n 's/^Saved: //p' | tail -n 1)"
     done_count=$((done_count + 1))
-    {
-      echo "- DONE: ${url}"
-      if [[ -n "${saved_path:-}" ]]; then
-        echo "  - File: ${saved_path}"
-      fi
-      echo
-    } >> "$summary_file"
+    printf '%s\n' "$output"
   else
     failed_count=$((failed_count + 1))
-    {
-      echo "- FAIL: ${url}"
-      echo "  - Output: $(printf '%s' "$output" | tr '\n' ' ' | sed 's/[[:space:]]\{1,\}/ /g' | cut -c1-300)"
-      echo
-    } >> "$summary_file"
+    printf '%s\n' "$output" >&2
   fi
+  echo
 done
 
-{
-  echo "## 统计"
-  echo
-  echo "- Success: ${done_count}"
-  echo "- Failed: ${failed_count}"
-} >> "$summary_file"
-
-echo "Saved summary: $summary_file"
-open "$summary_file"
-echo "Opened: $summary_file"
+echo "Batch complete: ${done_count} succeeded, ${failed_count} failed."
