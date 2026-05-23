@@ -1,0 +1,20 @@
+#!/bin/zsh
+set -euo pipefail
+
+if [[ $# -lt 2 ]]; then
+  echo "Usage: gh-demo-x-title-open --title <Custom Title> <github-repo-url> [extra note]" >&2
+  exit 1
+fi
+
+output="$(gh-demo-x "$@")"
+printf '%s\n' "$output"
+
+saved_path="$(printf '%s\n' "$output" | sed -n 's/^Saved: //p' | tail -n 1)"
+
+if [[ -z "${saved_path:-}" ]]; then
+  echo "Error: could not determine saved file path from gh-demo-x output" >&2
+  exit 1
+fi
+
+open "$saved_path"
+echo "Opened: $saved_path"

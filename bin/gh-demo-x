@@ -1,0 +1,299 @@
+#!/bin/zsh
+set -euo pipefail
+
+custom_title=""
+
+usage() {
+  echo "Usage: gh-demo-x [--title \"Custom Title\"] <github-repo-url> [extra note]" >&2
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --title)
+      shift
+      if [[ $# -lt 1 ]]; then
+        echo "Error: --title requires a value" >&2
+        exit 1
+      fi
+      custom_title="$1"
+      shift
+      ;;
+    --title=*)
+      custom_title="${1#--title=}"
+      shift
+      ;;
+    --help|-h)
+      usage
+      exit 0
+      ;;
+    *)
+      break
+      ;;
+  esac
+done
+
+if [[ $# -lt 1 ]]; then
+  usage
+  exit 1
+fi
+
+repo_url="$1"
+shift || true
+extra_note="${*:-}"
+
+if [[ ! "$repo_url" =~ ^https://github\.com/[^/]+/[^/]+/?$ ]]; then
+  echo "Error: expected a GitHub repo URL like https://github.com/owner/repo" >&2
+  exit 1
+fi
+
+slug="${repo_url#https://github.com/}"
+slug="${slug%/}"
+owner="${slug%%/*}"
+repo="${slug##*/}"
+
+vault_dir="${HOME}/Obsidian"
+out_dir="${vault_dir}/GitHub 仓库闭环"
+mkdir -p "$out_dir"
+
+timestamp="$(date +%Y%m%d-%H%M%S)"
+if [[ -n "$custom_title" ]]; then
+  safe_title="$(printf '%s' "$custom_title" | tr '/' '_' | tr ':' '_' | tr '\n' ' ' | sed 's/[[:space:]]\{1,\}/ /g; s/^ *//; s/ *$//')"
+  out_file="${out_dir}/${timestamp}-${safe_title}.md"
+else
+  out_file="${out_dir}/${timestamp}-${owner}-${repo}.md"
+fi
+tmp_file="${out_file}.tmp"
+
+tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/gh-demo-x.XXXXXX")"
+cleanup() {
+  rm -rf "$tmp_dir"
+}
+trap cleanup EXIT
+
+repo_api="https://api.github.com/repos/${owner}/${repo}"
+repo_json="${tmp_dir}/repo.json"
+clone_dir="${tmp_dir}/repo"
+facts_file="${tmp_dir}/facts.txt"
+
+metadata_ok="false"
+clone_ok="false"
+clone_error=""
+readme_path=""
+readme_excerpt=""
+default_branch=""
+head_commit=""
+
+if curl -fsSL -H "Accept: application/vnd.github+json" "$repo_api" -o "$repo_json" 2>/dev/null; then
+  metadata_ok="true"
+fi
+
+symref_output="$(git ls-remote --symref "https://github.com/${owner}/${repo}.git" HEAD 2>/dev/null || true)"
+if [[ -n "$symref_output" ]]; then
+  default_branch="$(printf '%s\n' "$symref_output" | sed -n 's#^ref: refs/heads/\(.*\)[[:space:]]\+HEAD$#\1#p' | head -n 1)"
+  head_commit="$(printf '%s\n' "$symref_output" | awk '/HEAD$/ && $1 !~ /^ref:/ {print $1; exit}')"
+fi
+
+if git clone --depth 1 --single-branch "https://github.com/${owner}/${repo}.git" "$clone_dir" >/dev/null 2>"${tmp_dir}/clone.err"; then
+  clone_ok="true"
+else
+  clone_error="$(sed -n '1,20p' "${tmp_dir}/clone.err" | tr '\n' ' ' | sed 's/[[:space:]]\{1,\}/ /g')"
+fi
+
+if [[ "$clone_ok" == "true" ]]; then
+  readme_path="$(find "$clone_dir" -maxdepth 1 -type f \( -iname 'README*' -o -iname 'readme*' \) | head -n 1 || true)"
+  if [[ -n "$readme_path" ]]; then
+    readme_excerpt="$(python3 - "$readme_path" "$default_branch" "$owner" "$repo" <<'PY'
+import re, sys, pathlib
+path = pathlib.Path(sys.argv[1])
+default_branch = sys.argv[2] or "main"
+owner = sys.argv[3]
+repo = sys.argv[4]
+try:
+    text = path.read_text(encoding='utf-8', errors='ignore')
+except Exception:
+    text = ''
+
+raw_base = f"https://raw.githubusercontent.com/{owner}/{repo}/{default_branch}/"
+
+def rewrite_md_image(match):
+    alt = match.group(1)
+    url = match.group(2).strip()
+    if re.match(r"^[a-z]+://", url):
+        return match.group(0)
+    return f"![{alt}]({raw_base}{url})"
+
+def rewrite_html_image(match):
+    prefix, url, suffix = match.groups()
+    if re.match(r"^[a-z]+://", url):
+        return match.group(0)
+    return f'{prefix}{raw_base}{url}{suffix}'
+
+text = re.sub(r'!\[([^\]]*)\]\(([^)]+)\)', rewrite_md_image, text)
+text = re.sub(r'(<img[^>]*src=["\'])([^"\']+)(["\'][^>]*>)', rewrite_html_image, text, flags=re.IGNORECASE)
+
+text = re.sub(r'```.*?```', '[code omitted]', text, flags=re.DOTALL)
+lines = [line.rstrip() for line in text.splitlines()]
+filtered = []
+for line in lines:
+    stripped = line.strip()
+    if stripped.startswith('![') or stripped.startswith('<img'):
+        continue
+    if 'raw.githubusercontent.com' in stripped:
+        continue
+    filtered.append(line)
+snippet = "\n".join(filtered[:90]).strip()
+print(snippet[:6000])
+PY
+)"
+  fi
+fi
+
+python3 - "$repo_json" "$metadata_ok" "$clone_dir" "$clone_ok" "$default_branch" "$head_commit" "$clone_error" > "$facts_file" <<'PY'
+import json, pathlib, sys
+
+repo_json, metadata_ok, clone_dir, clone_ok, default_branch, head_commit, clone_error = sys.argv[1:]
+
+meta = {}
+if metadata_ok == "true":
+    try:
+        meta = json.loads(pathlib.Path(repo_json).read_text())
+    except Exception:
+        meta = {}
+
+def p(label, value):
+    print(f"{label}: {value}")
+
+p("repo_url", meta.get("html_url") or "")
+p("full_name", meta.get("full_name") or "")
+p("description", (meta.get("description") or "").strip())
+p("homepage", (meta.get("homepage") or "").strip())
+p("language", meta.get("language") or "")
+p("stars", meta.get("stargazers_count", ""))
+p("forks", meta.get("forks_count", ""))
+p("open_issues", meta.get("open_issues_count", ""))
+p("default_branch", default_branch or meta.get("default_branch") or "")
+p("head_commit", head_commit)
+p("topics", ", ".join(meta.get("topics") or []))
+p("license", (meta.get("license") or {}).get("spdx_id", ""))
+p("archived", meta.get("archived", ""))
+p("disabled", meta.get("disabled", ""))
+p("created_at", meta.get("created_at", ""))
+p("pushed_at", meta.get("pushed_at", ""))
+p("clone_ok", clone_ok)
+p("clone_error", clone_error)
+
+if clone_ok == "true":
+    root = pathlib.Path(clone_dir)
+    top_level = sorted(p.name + ("/" if p.is_dir() else "") for p in root.iterdir())
+    manifests = []
+    for name in [
+        "package.json", "pnpm-lock.yaml", "yarn.lock", "bun.lockb",
+        "pyproject.toml", "requirements.txt", "Pipfile", "poetry.lock",
+        "Cargo.toml", "go.mod", "Dockerfile", "docker-compose.yml",
+        "docker-compose.yaml", "Makefile", "README.md"
+    ]:
+        if (root / name).exists():
+            manifests.append(name)
+    demo_hints = []
+    for pattern in ["demo", "example", "examples", "playground", "docs", "website", "web", "app"]:
+        for path in root.glob(f"*{pattern}*"):
+            demo_hints.append(path.name + ("/" if path.is_dir() else ""))
+    p("top_level", ", ".join(top_level[:80]))
+    p("manifests", ", ".join(manifests))
+    p("demo_hints", ", ".join(sorted(set(demo_hints))[:40]))
+PY
+
+read -r -d '' prompt <<EOF || true
+你现在不是做“技术最小闭环判断”，而是做“自媒体选题体验前判断”。
+
+请只基于下面这份【已验证事实卡】输出，不允许基于仓库名、组织名、常识去猜。缺失事实就明确说“无法判断”。
+
+用户真正关心的是：
+- 这个仓库值不值得花 30 分钟亲自体验
+- 如果值得，最适合从什么内容角度切入
+- 哪些点必须用户亲自验证，AI 不能替代
+- 为什么它可能不值得写
+
+请严格按下面结构输出，不要增删大项：
+
+1. 一句话判断：值得写 / 待定 / 不值得写
+2. 值得写的核心原因
+3. 最适合的内容角度
+4. 用户必须亲自验证的 2-3 个点
+5. 最小体验路径
+6. 写作风险 / 为什么可能不值得写
+7. 最终建议：入池 / 不入池 / 先观察
+
+硬约束：
+- 如果事实不足，就明确说“事实不足，暂不建议进入体验阶段”
+- 不要把“仓库跑不通”直接等同于“不值得写”；要判断是否仍有内容价值
+- 但如果既不可体验、也缺少可验证信息、也没有适合用户的内容角度，就明确建议不入池
+- 不要输出客套话，不要复述任务
+
+【已验证事实卡】
+EOF
+
+facts_content="$(cat "$facts_file")"
+prompt+=$'\n'"$facts_content"
+
+if [[ -n "$readme_excerpt" ]]; then
+  prompt+=$'\n\n【README 摘要（已截断）】\n'"$readme_excerpt"
+fi
+
+if [[ -n "$extra_note" ]]; then
+  prompt+=$'\n\n【额外说明】\n'"$extra_note"
+fi
+
+hermes_out="${tmp_dir}/hermes.out"
+hermes_err="${tmp_dir}/hermes.err"
+hermes_ok="false"
+session_line=""
+session_id=""
+failure_summary=""
+
+if hermes chat -Q -q "$prompt" >"$hermes_out" 2>"$hermes_err"; then
+  hermes_ok="true"
+else
+  session_line="$(grep -E '^session_id:' "$hermes_out" | tail -n 1 || true)"
+  session_id="${session_line#session_id: }"
+  session_id="${session_id## }"
+  failure_summary="$(sed -n '1,20p' "$hermes_err" | tr '\n' ' ' | sed 's/[[:space:]]\{1,\}/ /g; s/^ *//; s/ *$//')"
+
+  if [[ -z "$failure_summary" && -n "$session_id" ]]; then
+    failure_summary="$(grep -F "[$session_id]" ~/.hermes/logs/agent.log 2>/dev/null | tail -n 3 | tr '\n' ' ' | sed 's/[[:space:]]\{1,\}/ /g; s/^ *//; s/ *$//')"
+  fi
+
+  if [[ -z "$failure_summary" ]]; then
+    failure_summary="Hermes 未返回有效判断结果。请检查 provider 配置、额度或账单状态。"
+  fi
+fi
+
+{
+  echo "# GitHub 仓库选题判断"
+  echo
+  echo "- Repo: ${repo_url}"
+  echo "- Generated: $(date '+%Y-%m-%d %H:%M:%S')"
+  echo "- Stage: 选题体验前判断"
+  echo "- README: ${repo_url}#readme"
+  echo
+  echo "## 已验证事实"
+  echo
+  cat "$facts_file"
+  echo
+  echo "## 判断结果"
+  echo
+  if [[ "$hermes_ok" == "true" ]]; then
+    cat "$hermes_out"
+  else
+    echo "AI 判断未生成。"
+    echo
+    echo "- 原因：${failure_summary}"
+    if [[ -n "$session_id" ]]; then
+      echo "- Hermes Session: ${session_id}"
+    fi
+    echo "- 结论：GitHub 事实已成功抓取，但模型阶段失败；当前文件仍可用作事实卡。"
+  fi
+} > "$tmp_file"
+
+mv "$tmp_file" "$out_file"
+echo "Saved: $out_file"

@@ -1,0 +1,23 @@
+#!/bin/zsh
+set -euo pipefail
+
+cache_dir="${HOME}/Library/Caches/hermes-gh-demo"
+obsidian_dir="${HOME}/Obsidian/GitHub-Demo"
+
+latest_file=""
+
+if [[ -d "$cache_dir" ]]; then
+  latest_file="$(ls -t "$cache_dir"/*.md 2>/dev/null | head -n 1 || true)"
+fi
+
+if [[ -z "${latest_file:-}" && -d "$obsidian_dir" ]]; then
+  latest_file="$(ls -t "$obsidian_dir"/*.md 2>/dev/null | head -n 1 || true)"
+fi
+
+if [[ -z "${latest_file:-}" ]]; then
+  echo "No gh-demo result files found in $cache_dir or $obsidian_dir" >&2
+  exit 1
+fi
+
+open "$latest_file"
+echo "Opened: $latest_file"

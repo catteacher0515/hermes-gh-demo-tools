@@ -1,0 +1,71 @@
+#!/bin/zsh
+set -euo pipefail
+
+if [[ $# -lt 1 ]]; then
+  echo "Usage: gh-demo-save <github-repo-url> [extra note]" >&2
+  exit 1
+fi
+
+repo_url="$1"
+shift || true
+extra_note="${*:-}"
+
+if [[ ! "$repo_url" =~ ^https://github\.com/[^/]+/[^/]+/?$ ]]; then
+  echo "Error: expected a GitHub repo URL like https://github.com/owner/repo" >&2
+  exit 1
+fi
+
+slug="${repo_url#https://github.com/}"
+slug="${slug%/}"
+owner="${slug%%/*}"
+repo="${slug##*/}"
+
+vault_dir="${HOME}/Obsidian"
+out_dir="${vault_dir}/GitHub-Demo"
+mkdir -p "$out_dir"
+
+timestamp="$(date +%Y%m%d-%H%M%S)"
+out_file="${out_dir}/${timestamp}-${owner}-${repo}.md"
+
+read -r -d '' prompt <<EOF || true
+请用简体中文完成一个 GitHub 仓库快速闭环，不要重新做重筛选，也不要扩大初筛范围，不要写文章，不要发散。
+
+仓库链接：
+${repo_url}
+
+你的目标只有 6 项，请严格按这个顺序输出：
+
+1. 它解决什么问题
+2. 目标用户是谁
+3. 是否存在可用的在线 demo
+4. 如果在线 demo 不可用，如何在本机跑通最小闭环
+5. 我体验时最该观察的 3 个点
+6. 一个极简体验记录模板
+
+强约束：
+- 如果你无法验证在线 demo，就明确说“未验证成功”，不要假装可用
+- 如果本地跑不通，就停在失败点，并明确告诉我卡在哪一步
+- 优先给出最短路径，不要做无关扩展
+- 不要输出多余前言或客套
+- 如果结果适合本地执行，命令请尽量可直接复制
+EOF
+
+if [[ -n "$extra_note" ]]; then
+  prompt+=$'\n\n额外说明：\n'"$extra_note"
+fi
+
+tmp_file="${out_file}.tmp"
+
+{
+  echo "# GitHub Demo"
+  echo
+  echo "- Repo: ${repo_url}"
+  echo "- Generated: $(date '+%Y-%m-%d %H:%M:%S')"
+  echo
+  echo "---"
+  echo
+  hermes chat -Q -q "$prompt"
+} > "$tmp_file"
+
+mv "$tmp_file" "$out_file"
+echo "Saved: $out_file"

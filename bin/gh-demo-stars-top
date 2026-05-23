@@ -1,0 +1,110 @@
+#!/bin/zsh
+set -euo pipefail
+
+limit="5"
+skip_existing="true"
+dry_run="false"
+
+resolve_default_input() {
+  local best=""
+  local best_score=-1
+  local best_mtime=0
+  local path name score mtime
+
+  while IFS= read -r path; do
+    name="${path:t}"
+    case "${name:l}" in
+      *github*stars*top*|*github*star*top*|*star*top*)
+        score=3
+        ;;
+      *)
+        continue
+        ;;
+    esac
+
+    mtime="$(stat -f %m "$path" 2>/dev/null || echo 0)"
+    if (( score > best_score || (score == best_score && mtime > best_mtime) )); then
+      best="$path"
+      best_score="$score"
+      best_mtime="$mtime"
+    fi
+  done < <(find "${HOME}/Obsidian" -type f \( -name '*.csv' -o -name '*.txt' -o -name '*.md' \) 2>/dev/null)
+
+  if [[ -n "$best" ]]; then
+    printf '%s\n' "$best"
+  fi
+}
+
+usage() {
+  echo "Usage: gh-demo-stars-top [--limit N] [--no-skip-existing] [--dry-run] [input-file]" >&2
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --limit)
+      shift
+      if [[ $# -lt 1 ]]; then
+        echo "Error: --limit requires a value" >&2
+        usage
+        exit 1
+      fi
+      limit="$1"
+      shift
+      ;;
+    --limit=*)
+      limit="${1#--limit=}"
+      shift
+      ;;
+    --no-skip-existing)
+      skip_existing="false"
+      shift
+      ;;
+    --dry-run)
+      dry_run="true"
+      shift
+      ;;
+    --help|-h)
+      usage
+      exit 0
+      ;;
+    *)
+      break
+      ;;
+  esac
+done
+
+if [[ $# -gt 1 ]]; then
+  usage
+  exit 1
+fi
+
+input_file="${1:-}"
+
+if [[ -z "$input_file" ]]; then
+  input_file="$(resolve_default_input || true)"
+fi
+
+if [[ -z "${input_file:-}" ]]; then
+  echo "Error: could not find a default GitHub Star Top export file." >&2
+  echo "Pass a file explicitly: gh-demo-stars-top /path/to/export.csv" >&2
+  exit 1
+fi
+
+if [[ ! -f "$input_file" ]]; then
+  echo "Error: file not found: $input_file" >&2
+  exit 1
+fi
+
+echo "Using input: $input_file"
+
+args=( "--limit" "$limit" )
+
+if [[ "$skip_existing" == "true" ]]; then
+  args+=( "--skip-existing" )
+fi
+
+if [[ "$dry_run" == "true" ]]; then
+  gh-demo-batch "${args[@]}" --dry-run "$input_file"
+else
+  gh-demo-batch-open "${args[@]}" "$input_file"
+fi
