@@ -58,9 +58,9 @@ mkdir -p "$out_dir"
 timestamp="$(date +%Y%m%d-%H%M%S)"
 if [[ -n "$custom_title" ]]; then
   safe_title="$(printf '%s' "$custom_title" | tr '/' '_' | tr ':' '_' | tr '\n' ' ' | sed 's/[[:space:]]\{1,\}/ /g; s/^ *//; s/ *$//')"
-  out_file="${out_dir}/${timestamp}-${safe_title}.md"
+  out_file="${out_dir}/${safe_title}--${timestamp}.md"
 else
-  out_file="${out_dir}/${timestamp}-${owner}-${repo}.md"
+  out_file="${out_dir}/${owner}-${repo}--${timestamp}.md"
 fi
 tmp_file="${out_file}.tmp"
 
