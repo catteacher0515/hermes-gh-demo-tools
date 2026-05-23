@@ -1,0 +1,112 @@
+#!/bin/zsh
+set -euo pipefail
+
+dry_run="false"
+
+usage() {
+  echo "Usage: gh-demo-multi [--dry-run] <github-repo-url> [more github-repo-urls ...]" >&2
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --dry-run)
+      dry_run="true"
+      shift
+      ;;
+    --help|-h)
+      usage
+      exit 0
+      ;;
+    *)
+      break
+      ;;
+  esac
+done
+
+if [[ $# -lt 1 ]]; then
+  usage
+  exit 1
+fi
+
+vault_dir="${HOME}/Obsidian"
+out_dir="${vault_dir}/GitHub 仓库闭环"
+mkdir -p "$out_dir"
+
+timestamp="$(date +%Y%m%d-%H%M%S)"
+summary_file="${out_dir}/gh-demo-multi-summary--${timestamp}.md"
+
+typeset -A seen_urls
+repo_urls=()
+
+for arg in "$@"; do
+  if [[ ! "$arg" =~ ^https://github\.com/[^/]+/[^/]+/?$ ]]; then
+    echo "Error: expected a GitHub repo URL like https://github.com/owner/repo" >&2
+    echo "Bad input: $arg" >&2
+    exit 1
+  fi
+
+  clean="${arg%/}"
+  if [[ -n "${seen_urls[$clean]:-}" ]]; then
+    continue
+  fi
+  seen_urls[$clean]=1
+  repo_urls+=("$clean")
+done
+
+total="${#repo_urls[@]}"
+done_count=0
+failed_count=0
+
+{
+  echo "# GitHub 仓库批量判断摘要"
+  echo
+  echo "- Generated: $(date '+%Y-%m-%d %H:%M:%S')"
+  echo "- Total: ${total}"
+  echo "- Mode: $( [[ "$dry_run" == "true" ]] && echo "dry-run" || echo "run" )"
+  echo
+  echo "## 仓库列表"
+  echo
+} > "$summary_file"
+
+if [[ "$dry_run" == "true" ]]; then
+  for url in "${repo_urls[@]}"; do
+    echo "- ${url}" >> "$summary_file"
+    echo "Would process: $url"
+  done
+  echo
+  echo "Saved summary: $summary_file"
+  exit 0
+fi
+
+for url in "${repo_urls[@]}"; do
+  echo "Processing: $url"
+  if output="$(./bin/gh-demo-x "$url" 2>&1)"; then
+    saved_path="$(printf '%s\n' "$output" | sed -n 's/^Saved: //p' | tail -n 1)"
+    done_count=$((done_count + 1))
+    {
+      echo "- DONE: ${url}"
+      if [[ -n "${saved_path:-}" ]]; then
+        echo "  - File: ${saved_path}"
+      fi
+      echo
+    } >> "$summary_file"
+  else
+    failed_count=$((failed_count + 1))
+    {
+      echo "- FAIL: ${url}"
+      echo "  - Output: $(printf '%s' "$output" | tr '\n' ' ' | sed 's/[[:space:]]\{1,\}/ /g' | cut -c1-300)"
+      echo
+    } >> "$summary_file"
+  fi
+done
+
+{
+  echo "## 统计"
+  echo
+  echo "- Success: ${done_count}"
+  echo "- Failed: ${failed_count}"
+} >> "$summary_file"
+
+echo "Saved summary: $summary_file"
+open "$summary_file"
+echo "Opened: $summary_file"
