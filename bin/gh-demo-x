@@ -638,6 +638,126 @@ def fallback_markdown(raw_text):
         body = "事实已抓取，但模型未返回可用判断内容。"
     return "## 判断结果\n\n" + body + "\n"
 
+def clean_body_text(value):
+    value = (value or "").strip()
+    value = re.sub(r'^\*+\s*', '', value)
+    value = re.sub(r'\s*\*+$', '', value)
+    value = value.strip()
+    if not has_meaningful_content(value):
+        return ""
+    return value
+
+def structured_section_markdown(idx, label, raw_value):
+    raw_value = (raw_value or "").strip()
+    if not has_meaningful_content(raw_value):
+        return []
+
+    title, body = split_title_body(raw_value)
+    title = clean_body_text(title)
+    body = clean_body_text(body)
+
+    out = [f"### {idx}. {label}"]
+
+    if idx in (1, 2):
+        value = body or title
+        if not has_meaningful_content(value):
+            return []
+        out.append(f"**{value}**")
+        out.append("")
+        return out
+
+    if idx == 3:
+        value = body or title
+        if not has_meaningful_content(value):
+            return []
+        out.append(value)
+        out.append("")
+        return out
+
+    if idx in (4, 5, 6, 9):
+        lead = body or title
+        if not has_meaningful_content(lead):
+            return []
+        lead = re.sub(r'\s+[—-]\s+', '\n\n', lead, count=1)
+        parts = [p.strip() for p in lead.split("\n\n", 1)]
+        first = clean_body_text(parts[0]) if parts else ""
+        if not has_meaningful_content(first):
+            return []
+        out.append(f"**{first}**")
+        out.append("")
+        if len(parts) > 1 and has_meaningful_content(parts[1]):
+            out.append("原因：")
+            out.append("")
+            sentences = [clean_body_text(s) for s in re.split(r'；', parts[1]) if clean_body_text(s)]
+            if len(sentences) > 1:
+                for s in sentences:
+                    out.append(f"- {s}")
+            elif sentences:
+                out.append(sentences[0])
+            out.append("")
+        return out
+
+    if idx == 7:
+        value = body or title
+        if value.startswith("："):
+            value = value[1:].strip()
+        bullets = [clean_body_text(s) for s in re.split(r'[；\n]+', value) if clean_body_text(s)]
+        if not bullets:
+            return []
+        for b in bullets:
+            out.append(f"- {b}")
+        out.append("")
+        return out
+
+    if idx == 8:
+        value = body or title
+        if not has_meaningful_content(value):
+            return []
+        if "——" in value or "—" in value:
+            value = re.sub(r'\s*[—-]\s*', '\n\n', value, count=1)
+        parts = [p.strip() for p in value.split("\n\n", 1)]
+        first = clean_body_text(parts[0]) if parts else ""
+        if first:
+            out.append(first)
+            out.append("")
+        if len(parts) > 1 and has_meaningful_content(parts[1]):
+            bullets = [clean_body_text(s) for s in re.split(r'[；\n]+', parts[1]) if clean_body_text(s)]
+            for b in bullets:
+                out.append(f"- {b}")
+            out.append("")
+        return out if len(out) > 1 else []
+
+    return []
+
+def raw_fragment_lines(raw_text):
+    result = []
+    for line in raw_text.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            result.append("")
+            continue
+        if re.match(r'^\d+\.\s*', stripped):
+            continue
+        if stripped in labels.values():
+            continue
+        if re.match(r'^Proceeding with strict analysis', stripped):
+            continue
+        if re.match(r'^严格基于', stripped):
+            continue
+        if re.match(r'^事实充足', stripped):
+            continue
+        if re.match(r'^无法访问 GitHub 页面', stripped):
+            continue
+        if stripped == "原因：":
+            continue
+        result.append(line.rstrip())
+
+    while result and not result[0].strip():
+        result.pop(0)
+    while result and not result[-1].strip():
+        result.pop()
+    return result
+
 out = []
 out.append("## 判断结果")
 out.append("")
@@ -654,99 +774,42 @@ labels = {
     9: "体验投入等级 + 最终动作",
 }
 
-raw_non_empty_count = sum(1 for idx in range(1, 10) if has_meaningful_content(items.get(idx, "")))
-if raw_non_empty_count < 6:
-    dst.write_text(fallback_markdown(text), encoding='utf-8')
-    sys.exit(0)
-
+structured_found = []
 for idx in range(1, 10):
     raw = items.get(idx, "")
-    title, body = split_title_body(raw)
     header = labels[idx]
-    out.append(f"### {idx}. {header}")
+    section = structured_section_markdown(idx, header, raw)
+    if section:
+        out.extend(section)
+        structured_found.append(idx)
 
-    if idx in (1, 2):
-        out.append(f"**{body or title}**")
-        out.append("")
-        continue
-
-    if idx == 3:
-        out.append(body or title)
-        out.append("")
-        continue
-
-    if idx in (4, 5, 6, 9):
-        lead = body or title
-        lead = re.sub(r'\s*[—-]\s*', '\n\n', lead, count=1)
-        parts = [p.strip() for p in lead.split("\n\n", 1)]
-        out.append(f"**{parts[0]}**")
-        out.append("")
-        if len(parts) > 1 and parts[1]:
-            out.append("原因：")
-            out.append("")
-            sentences = [s.strip() for s in re.split(r'；', parts[1]) if s.strip()]
-            if len(sentences) > 1:
-                for s in sentences:
-                    out.append(f"- {s}")
-            else:
-                out.append(parts[1])
-            out.append("")
-        continue
-
-    if idx == 7:
-        body = body or title
-        body = body.replace("：", "", 1) if body.startswith("：") else body
-        bullets = [s.strip(" 　-") for s in re.split(r'[；\n]+', body) if s.strip(" 　-")]
-        for b in bullets:
-            out.append(f"- {b}")
-        out.append("")
-        continue
-
-    if idx == 8:
-        body = body or title
-        if "——" in body or "—" in body:
-            body = re.sub(r'\s*[—-]\s*', '\n\n', body, count=1)
-        parts = [p.strip() for p in body.split("\n\n", 1)]
-        if parts and parts[0]:
-            out.append(parts[0])
-            out.append("")
-        if len(parts) > 1 and parts[1]:
-            bullets = [s.strip(" 　-") for s in re.split(r'[；\n]+', parts[1]) if s.strip(" 　-")]
-            for b in bullets:
-                out.append(f"- {b}")
-            out.append("")
-        continue
-
-formatted = "\n".join(out).strip() + "\n"
-formatted_has_empty_shell = False
-for idx in range(1, 10):
-    marker = f"### {idx}. {labels[idx]}"
-    if marker not in formatted:
-        formatted_has_empty_shell = True
-        break
-
-empty_shell_patterns = [
-    r'^### \d+\..*?\n\*\*\*\*\s*$',
-    r'^### \d+\..*?\n\s*$',
-]
-
-if not formatted_has_empty_shell:
-    lines = formatted.splitlines()
-    for i, line in enumerate(lines):
-        if re.match(r'^### \d+\.', line):
-            next_nonempty = ""
-            for j in range(i + 1, len(lines)):
-                if lines[j].strip():
-                    next_nonempty = lines[j].strip()
-                    break
-            if not has_meaningful_content(next_nonempty):
-                formatted_has_empty_shell = True
-                break
-
-if formatted_has_empty_shell:
+raw_non_empty_count = sum(1 for idx in range(1, 10) if has_meaningful_content(items.get(idx, "")))
+if raw_non_empty_count < 2:
     dst.write_text(fallback_markdown(text), encoding='utf-8')
 else:
-    dst.write_text(formatted, encoding='utf-8')
+    raw_lines = raw_fragment_lines(text)
+    if len(structured_found) >= 6:
+        formatted = "\n".join(out).strip() + "\n"
+        dst.write_text(formatted, encoding='utf-8')
+    elif structured_found:
+        hybrid = out[:]
+        if raw_lines:
+            if hybrid and hybrid[-1] != "":
+                hybrid.append("")
+            hybrid.append("### 原始判断片段")
+            hybrid.append("")
+            hybrid.extend(raw_lines)
+        hybrid_text = "\n".join(hybrid).strip() + "\n"
+        dst.write_text(hybrid_text, encoding='utf-8')
+    else:
+        fallback_lines = [
+            "## 判断结果",
+            "",
+            "以下内容为 Hermes 原始判断片段，因结构化解析失败，保留原文供人工阅读：",
+            "",
+        ]
+        fallback_lines.extend(raw_lines if raw_lines else ["事实已抓取，但模型未返回可用判断内容。"])
+        dst.write_text("\n".join(fallback_lines).strip() + "\n", encoding='utf-8')
 PY
 fi
 
