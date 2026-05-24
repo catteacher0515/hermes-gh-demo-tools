@@ -532,7 +532,7 @@ hermes_ok="false"
 session_line=""
 session_id=""
 failure_summary=""
-hermes_timeout_sec="${HERMES_GH_DEMO_TIMEOUT_SEC:-180}"
+hermes_timeout_sec="${HERMES_GH_DEMO_TIMEOUT_SEC:-300}"
 hermes_timed_out="false"
 
 if python3 - "$prompt" "$hermes_out" "$hermes_err" "$hermes_timeout_sec" <<'PY'
