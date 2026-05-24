@@ -532,8 +532,39 @@ hermes_ok="false"
 session_line=""
 session_id=""
 failure_summary=""
+hermes_timeout_sec="${HERMES_GH_DEMO_TIMEOUT_SEC:-180}"
+hermes_timed_out="false"
 
-if hermes chat -Q -q "$prompt" >"$hermes_out" 2>"$hermes_err"; then
+if python3 - "$prompt" "$hermes_out" "$hermes_err" "$hermes_timeout_sec" <<'PY'
+import pathlib, subprocess, sys
+
+prompt = sys.argv[1]
+out_path = pathlib.Path(sys.argv[2])
+err_path = pathlib.Path(sys.argv[3])
+timeout_sec = int(sys.argv[4])
+
+try:
+    proc = subprocess.run(
+        ["hermes", "chat", "-Q", "-q", prompt],
+        capture_output=True,
+        text=True,
+        timeout=timeout_sec,
+    )
+    out_path.write_text(proc.stdout or "", encoding="utf-8")
+    err_path.write_text(proc.stderr or "", encoding="utf-8")
+    raise SystemExit(proc.returncode)
+except subprocess.TimeoutExpired as exc:
+    stdout = exc.stdout or ""
+    stderr = exc.stderr or ""
+    if isinstance(stdout, bytes):
+        stdout = stdout.decode("utf-8", errors="ignore")
+    if isinstance(stderr, bytes):
+        stderr = stderr.decode("utf-8", errors="ignore")
+    out_path.write_text(stdout, encoding="utf-8")
+    err_path.write_text((stderr + f"\nTIMEOUT: Hermes exceeded {timeout_sec}s\n").strip() + "\n", encoding="utf-8")
+    raise SystemExit(124)
+PY
+then
   hermes_ok="true"
 else
   session_line="$(grep -E '^session_id:' "$hermes_out" | tail -n 1 || true)"
@@ -549,7 +580,13 @@ else
     failure_summary="Hermes 未返回有效判断结果。请检查 provider 配置、额度或账单状态。"
   fi
 
-  failure_summary="$(printf '%s' "$failure_summary" | python3 - <<'PY'
+  if grep -q "TIMEOUT: Hermes exceeded" "$hermes_err" 2>/dev/null; then
+    hermes_timed_out="true"
+    failure_summary="Hermes 判断阶段超时（>${hermes_timeout_sec}s）。事实已抓取成功，但模型输出未在预期时间内完成。"
+  fi
+
+  if [[ "$hermes_timed_out" != "true" ]]; then
+    failure_summary="$(printf '%s' "$failure_summary" | python3 - <<'PY'
 import re, sys
 text = sys.stdin.read().strip()
 patterns = [
@@ -568,6 +605,7 @@ else:
     print(text[:240] if text else "")
 PY
 )"
+  fi
 fi
 
 if [[ "$hermes_ok" == "true" ]]; then
