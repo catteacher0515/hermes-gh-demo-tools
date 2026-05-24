@@ -620,6 +620,24 @@ def split_title_body(s):
         return title.strip(), body.strip()
     return s.strip(), ""
 
+def has_meaningful_content(value):
+    value = (value or "").strip()
+    if not value:
+        return False
+    normalized = re.sub(r'[*_`#>\-\s]+', '', value)
+    return bool(normalized)
+
+def fallback_markdown(raw_text):
+    raw_lines = [line.rstrip() for line in raw_text.splitlines()]
+    while raw_lines and not raw_lines[0].strip():
+        raw_lines.pop(0)
+    while raw_lines and not raw_lines[-1].strip():
+        raw_lines.pop()
+    body = "\n".join(raw_lines).strip()
+    if not body:
+        body = "事实已抓取，但模型未返回可用判断内容。"
+    return "## 判断结果\n\n" + body + "\n"
+
 out = []
 out.append("## 判断结果")
 out.append("")
@@ -635,6 +653,11 @@ labels = {
     8: "你必须亲自验证的点",
     9: "体验投入等级 + 最终动作",
 }
+
+raw_non_empty_count = sum(1 for idx in range(1, 10) if has_meaningful_content(items.get(idx, "")))
+if raw_non_empty_count < 6:
+    dst.write_text(fallback_markdown(text), encoding='utf-8')
+    sys.exit(0)
 
 for idx in range(1, 10):
     raw = items.get(idx, "")
@@ -695,7 +718,35 @@ for idx in range(1, 10):
         continue
 
 formatted = "\n".join(out).strip() + "\n"
-dst.write_text(formatted, encoding='utf-8')
+formatted_has_empty_shell = False
+for idx in range(1, 10):
+    marker = f"### {idx}. {labels[idx]}"
+    if marker not in formatted:
+        formatted_has_empty_shell = True
+        break
+
+empty_shell_patterns = [
+    r'^### \d+\..*?\n\*\*\*\*\s*$',
+    r'^### \d+\..*?\n\s*$',
+]
+
+if not formatted_has_empty_shell:
+    lines = formatted.splitlines()
+    for i, line in enumerate(lines):
+        if re.match(r'^### \d+\.', line):
+            next_nonempty = ""
+            for j in range(i + 1, len(lines)):
+                if lines[j].strip():
+                    next_nonempty = lines[j].strip()
+                    break
+            if not has_meaningful_content(next_nonempty):
+                formatted_has_empty_shell = True
+                break
+
+if formatted_has_empty_shell:
+    dst.write_text(fallback_markdown(text), encoding='utf-8')
+else:
+    dst.write_text(formatted, encoding='utf-8')
 PY
 fi
 
